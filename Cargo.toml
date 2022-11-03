@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.66"
 axum = "0.5.17"
+chrono = { version = "0.4.22", features = ["serde"] }
 futures = "0.3.25"
 ipgeolocate = "0.3.5"
 lazy_static = "1.4.0"

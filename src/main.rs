@@ -1,13 +1,18 @@
 use std::{
     collections::BTreeMap,
-    sync::atomic::{AtomicI16, AtomicUsize},
+    sync::{
+        atomic::{AtomicI16, AtomicUsize},
+        Arc,
+    },
 };
 
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use ipgeolocate::{Locator, Service};
 use lazy_static::lazy_static;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tracing::warn;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -80,7 +85,9 @@ impl GlobalIpMap {
 }
 
 lazy_static! {
+    pub static ref GLOBAL_IP_MAP: GlobalIpMap = GlobalIpMap::new();
     pub static ref IP_APIS_POOL: IpApisSuggestor = IpApisSuggestor::new();
+    pub static ref GLOBAL_PEERS_INFO: PeerList = PeerList::new();
 }
 
 // change api usage for each loop
@@ -163,8 +170,85 @@ async fn get_ip_info(ips: Vec<String>) -> Vec<IpInfo> {
     ip_infos
 }
 
+const API_BASE_URL: &str = "https://vm.aleo.org/api";
+const PEERS_ALL: &str = "/testnet3/peers/all";
 
+lazy_static! {
+    pub static ref PEERS_ALL_URL: String = format!("{API_BASE_URL}{PEERS_ALL}");
+}
 
+pub type IpResult = Vec<String>;
+
+async fn get_ips_from_rpc() -> anyhow::Result<IpResult> {
+    Ok(reqwest::get(&*PEERS_ALL_URL).await?.json().await?)
+}
+
+pub struct PeerList {
+    pub peers: Arc<RwLock<IpResult>>,
+    pub peers_info: Arc<RwLock<Vec<IpInfo>>>,
+    pub last_updated: Arc<RwLock<DateTime<Utc>>>,
+}
+
+const UPDATE_INTERVAL: u64 = 30;
+
+async fn init_updater_inner(
+    peers: Arc<RwLock<IpResult>>,
+    last_updated: Arc<RwLock<DateTime<Utc>>>,
+    peers_info: Arc<RwLock<Vec<IpInfo>>>,
+) -> anyhow::Result<()> {
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(UPDATE_INTERVAL)).await;
+
+        let new_peers = get_ips_from_rpc().await?;
+        let flag = { *peers.read() == new_peers };
+
+        if !flag {
+            let new_peers_info = GLOBAL_IP_MAP.get_ips_info(new_peers.clone()).await;
+            {
+                *peers_info.write() = new_peers_info;
+                *peers.write() = new_peers
+            }
+            {
+                *last_updated.write() = Utc::now()
+            }
+        }
+    }
+}
+
+impl PeerList {
+    pub fn new() -> Self {
+        Self {
+            peers: Arc::new(RwLock::new(vec![])),
+            last_updated: Arc::new(RwLock::new(Utc::now())),
+            peers_info: Arc::new(RwLock::new(vec![])),
+        }
+    }
+
+    pub async fn init_updater(&self) {
+        let peers = self.peers.clone();
+        let last_updated = self.last_updated.clone();
+        let peers_info = self.peers_info.clone();
+
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) =
+                    init_updater_inner(peers.clone(), last_updated.clone(), peers_info.clone())
+                        .await
+                {
+                    tracing::error!("{}", e);
+                    continue;
+                }
+            }
+        });
+    }
+}
+
+#[tokio::test]
+async fn test_get_ips_from_rpc() -> anyhow::Result<()> {
+    get_ips_from_rpc().await?;
+
+    Ok(())
+}
 
 // store latest ip infos
 pub struct CurrentIpInfo {}
