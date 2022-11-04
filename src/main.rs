@@ -9,17 +9,18 @@ use std::{
 };
 
 use axum::{Json, Router, Server};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use futures::StreamExt;
 use ipgeolocate::{Locator, Service};
 use lazy_static::lazy_static;
 use parking_lot::RwLock;
 use reqwest::StatusCode;
+use savefile_derive::Savefile;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Savefile)]
 pub struct IpInfo {
     pub ip: String,
     pub lat: f32,
@@ -44,6 +45,25 @@ impl From<Locator> for IpInfo {
     }
 }
 
+use savefile::{load_file, save_file};
+const DEFAULT_IPMAP_FILE: &str = "ipmap.bin";
+lazy_static! {
+    pub static ref IPMAP_FILE: String = {
+        option_env!("IPMAP_FILE")
+            .unwrap_or(DEFAULT_IPMAP_FILE)
+            .to_string()
+    };
+}
+
+fn save_ip_map(map: &GlobalIpMap) {
+    save_file(&*IPMAP_FILE, 0, map).unwrap();
+}
+
+fn load_ipmap() -> anyhow::Result<GlobalIpMap> {
+    Ok(load_file(&*IPMAP_FILE, 0)?)
+}
+
+#[derive(Savefile)]
 pub struct GlobalIpMap {
     pub map: RwLock<BTreeMap<String, IpInfo>>,
 }
@@ -55,9 +75,19 @@ impl GlobalIpMap {
         }
     }
 
+    fn load() -> anyhow::Result<GlobalIpMap> {
+        let config: GlobalIpMap = load_ipmap()?.into();
+        Ok(config)
+    }
+
+    pub fn save(&self) {
+        save_ip_map(self);
+    }
+
     // add new ip: ip_info pair to map
     pub fn insert(&self, ip: String, ip_info: IpInfo) {
         self.map.write().insert(ip, ip_info);
+        self.save();
     }
 
     pub async fn get_ips_info(&self, ips: Vec<String>) -> Vec<IpInfo> {
@@ -89,7 +119,12 @@ impl GlobalIpMap {
 }
 
 lazy_static! {
-    pub static ref GLOBAL_IP_MAP: GlobalIpMap = GlobalIpMap::new();
+    pub static ref GLOBAL_IP_MAP: GlobalIpMap = {
+        match GlobalIpMap::load() {
+            Ok(c) => c,
+            Err(_) => GlobalIpMap::new(),
+        }
+    };
     pub static ref IP_APIS_POOL: IpApisSuggestor = IpApisSuggestor::new();
     pub static ref GLOBAL_PEERS_INFO: PeerList = PeerList::new();
 }
@@ -193,14 +228,14 @@ async fn get_ips_from_rpc() -> anyhow::Result<IpResult> {
 pub struct PeerList {
     pub peers: Arc<RwLock<IpResult>>,
     pub peers_info: Arc<RwLock<Vec<IpInfo>>>,
-    pub last_updated: Arc<RwLock<DateTime<Utc>>>,
+    pub last_updated: Arc<RwLock<String>>,
 }
 
 const UPDATE_INTERVAL: u64 = 30;
 
 async fn init_updater_inner(
     peers: Arc<RwLock<IpResult>>,
-    last_updated: Arc<RwLock<DateTime<Utc>>>,
+    last_updated: Arc<RwLock<String>>,
     peers_info: Arc<RwLock<Vec<IpInfo>>>,
 ) -> anyhow::Result<()> {
     loop {
@@ -216,7 +251,7 @@ async fn init_updater_inner(
                 *peers.write() = new_peers
             }
             {
-                *last_updated.write() = Utc::now()
+                *last_updated.write() = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
             }
         }
     }
@@ -226,7 +261,9 @@ impl PeerList {
     pub fn new() -> Self {
         Self {
             peers: Arc::new(RwLock::new(vec![])),
-            last_updated: Arc::new(RwLock::new(Utc::now())),
+            last_updated: Arc::new(RwLock::new(
+                Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            )),
             peers_info: Arc::new(RwLock::new(vec![])),
         }
     }
@@ -264,16 +301,29 @@ async fn test_get_ips_from_rpc() -> anyhow::Result<()> {
 // store latest ip infos
 pub struct CurrentIpInfo {}
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapRes {
+    pub last_update: String,
+    pub total: usize,
+    pub ips: Vec<IpInfo>,
+}
+
 pub async fn map() -> Result<Json<Value>, (StatusCode, String)> {
     let infos = GLOBAL_PEERS_INFO.get();
+    let out = MapRes {
+        last_update: GLOBAL_PEERS_INFO.last_updated.read().clone(),
+        total: infos.len(),
+        ips: infos,
+    };
 
-    Ok(Json(json!(infos)))
+    Ok(Json(json!(out)))
 }
 
 async fn init_router() -> anyhow::Result<Router> {
     use axum::routing::get;
 
-    Ok(Router::new().route("/map", get(map)))
+    Ok(Router::new().route("/api/map", get(map)))
 }
 
 // Prints the city where 1.1.1.1 is.
