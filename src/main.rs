@@ -1,19 +1,23 @@
 use std::{
     collections::BTreeMap,
+    net::SocketAddr,
+    str::FromStr,
     sync::{
         atomic::{AtomicI16, AtomicUsize},
         Arc,
     },
 };
 
+use axum::{Json, Router, Server};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use ipgeolocate::{Locator, Service};
 use lazy_static::lazy_static;
 use parking_lot::RwLock;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tracing::warn;
+use serde_json::{json, Value};
+use tracing::{info, warn};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IpInfo {
@@ -158,6 +162,8 @@ async fn get_ip_info(ips: Vec<String>) -> Vec<IpInfo> {
     let mut next = ips.clone();
 
     loop {
+        info!("remaining ips to get info {}", next.len());
+        println!("remaining ips to get info {}", next.len());
         let (out_infos, out_next) = get_ip_info_inner(next).await;
         ip_infos.extend(out_infos);
 
@@ -165,6 +171,7 @@ async fn get_ip_info(ips: Vec<String>) -> Vec<IpInfo> {
             break;
         }
         next = out_next;
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }
 
     ip_infos
@@ -241,6 +248,10 @@ impl PeerList {
             }
         });
     }
+
+    pub fn get(&self) -> Vec<IpInfo> {
+        self.peers_info.read().clone()
+    }
 }
 
 #[tokio::test]
@@ -253,18 +264,52 @@ async fn test_get_ips_from_rpc() -> anyhow::Result<()> {
 // store latest ip infos
 pub struct CurrentIpInfo {}
 
+pub async fn map() -> Result<Json<Value>, (StatusCode, String)> {
+    let infos = GLOBAL_PEERS_INFO.get();
+
+    Ok(Json(json!(infos)))
+}
+
+async fn init_router() -> anyhow::Result<Router> {
+    use axum::routing::get;
+
+    Ok(Router::new().route("/map", get(map)))
+}
+
 // Prints the city where 1.1.1.1 is.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenv::dotenv().ok();
     tracing_subscriber::fmt::init();
 
-    let service = Service::IpApi;
-    let ip = "1.1.1.1";
+    GLOBAL_PEERS_INFO.init_updater().await;
 
-    match Locator::get(ip, service).await {
-        Ok(ip) => println!("{} - {} ({})", ip.ip, ip.city, ip.country),
-        Err(error) => println!("Error: {}", error),
-    };
+    let host = std::env::var("HOST").expect("HOST is not set in .env file");
+    let port = std::env::var("PORT").expect("HOST is not set in .env file");
+    let server_url = format!("{}:{}", host, port);
+    let addr = SocketAddr::from_str(&server_url).unwrap();
+
+    tracing::debug!("listening on {}", addr);
+    let app = init_router().await.expect("init router error!");
+    Server::bind(&addr).serve(app.into_make_service()).await?;
+    // init
+
+    loop {
+        let infos = GLOBAL_PEERS_INFO.get();
+        info!("len: {}", infos.len());
+        dbg!(infos);
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    }
+
+    // GLOBAL_PEERS_INFO
+
+    // let service = Service::IpApi;
+    // let ip = "1.1.1.1";
+
+    // match Locator::get(ip, service).await {
+    //     Ok(ip) => println!("{} - {} ({})", ip.ip, ip.city, ip.country),
+    //     Err(error) => println!("Error: {}", error),
+    // };
 
     Ok(())
 }
