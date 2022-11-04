@@ -2,14 +2,11 @@ use std::{
     collections::BTreeMap,
     net::SocketAddr,
     str::FromStr,
-    sync::{
-        atomic::{AtomicI16, AtomicUsize},
-        Arc,
-    },
+    sync::{atomic::AtomicUsize, Arc},
 };
 
 use axum::{Json, Router, Server};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{SecondsFormat, Utc};
 use futures::StreamExt;
 use ipgeolocate::{Locator, Service};
 use lazy_static::lazy_static;
@@ -68,6 +65,12 @@ pub struct GlobalIpMap {
     pub map: RwLock<BTreeMap<String, IpInfo>>,
 }
 
+impl Default for GlobalIpMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GlobalIpMap {
     pub fn new() -> Self {
         Self {
@@ -76,7 +79,7 @@ impl GlobalIpMap {
     }
 
     fn load() -> anyhow::Result<GlobalIpMap> {
-        let config: GlobalIpMap = load_ipmap()?.into();
+        let config: GlobalIpMap = load_ipmap()?;
         Ok(config)
     }
 
@@ -130,6 +133,7 @@ lazy_static! {
 }
 
 // change api usage for each loop
+#[derive(Default)]
 pub struct IpApisSuggestor {
     pub pool: Vec<Service>,
     pub count: AtomicUsize,
@@ -257,6 +261,12 @@ async fn init_updater_inner(
     }
 }
 
+impl Default for PeerList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PeerList {
     pub fn new() -> Self {
         Self {
@@ -322,11 +332,20 @@ pub async fn map() -> Result<Json<Value>, (StatusCode, String)> {
 
 async fn init_router() -> anyhow::Result<Router> {
     use axum::routing::get;
+    use http::Method;
+    use tower_http::cors::{Any, CorsLayer};
 
-    Ok(Router::new().route("/api/map", get(map)))
+    let cors = CorsLayer::new()
+        // allow `GET` and `POST` when accessing the resource
+        .allow_methods([Method::GET, Method::POST])
+        // allow requests from any origin
+        .allow_origin(Any);
+
+    let router = Router::new().route("/api/map", get(map)).layer(cors);
+
+    Ok(router)
 }
 
-// Prints the city where 1.1.1.1 is.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
@@ -342,24 +361,6 @@ async fn main() -> anyhow::Result<()> {
     tracing::debug!("listening on {}", addr);
     let app = init_router().await.expect("init router error!");
     Server::bind(&addr).serve(app.into_make_service()).await?;
-    // init
-
-    loop {
-        let infos = GLOBAL_PEERS_INFO.get();
-        info!("len: {}", infos.len());
-        dbg!(infos);
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-    }
-
-    // GLOBAL_PEERS_INFO
-
-    // let service = Service::IpApi;
-    // let ip = "1.1.1.1";
-
-    // match Locator::get(ip, service).await {
-    //     Ok(ip) => println!("{} - {} ({})", ip.ip, ip.city, ip.country),
-    //     Err(error) => println!("Error: {}", error),
-    // };
 
     Ok(())
 }
