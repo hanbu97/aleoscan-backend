@@ -65,6 +65,7 @@ dependencies = [
  "chrono",
  "dotenv",
  "futures",
+ "http",
  "ipgeolocate",
  "lazy_static",
  "parking_lot",
@@ -74,6 +75,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
 ]
